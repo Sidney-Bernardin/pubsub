@@ -14,8 +14,8 @@ import (
 )
 
 type WSClient struct {
-	id              string
-	hasSubscription bool
+	id   string
+	conn *websocket.Conn
 }
 
 type handler struct {
@@ -39,7 +39,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create a new wsClient, then add it to the handler.
-	client := WSClient{uuid.Must(uuid.NewV4()).String(), false}
+	client := WSClient{uuid.Must(uuid.NewV4()).String(), conn}
 	h.mu.Lock()
 	h.clients[client.id] = &client
 	h.mu.Unlock()
