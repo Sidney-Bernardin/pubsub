@@ -13,20 +13,24 @@ import (
 	"github.com/rs/zerolog"
 )
 
-type WSClient struct {
-	id   string
-	conn *websocket.Conn
+var (
+	errMustBePubOrSub = errors.New("action must be publish or subscribe")
+)
+
+type Client struct {
+	ID   string
+	Conn *websocket.Conn
 }
 
 type handler struct {
 	upgrader *websocket.Upgrader
 	logger   *zerolog.Logger
 	mu       sync.Mutex
-	clients  map[string]*WSClient
+	clients  map[string]*Client
 }
 
 func NewHandler(upgrader *websocket.Upgrader, logger *zerolog.Logger) *handler {
-	return &handler{upgrader, logger, sync.Mutex{}, map[string]*WSClient{}}
+	return &handler{upgrader, logger, sync.Mutex{}, map[string]*Client{}}
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -38,10 +42,10 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create a new wsClient, then add it to the handler.
-	client := WSClient{uuid.Must(uuid.NewV4()).String(), conn}
+	// Create and add a new wsClient to the clients map.
+	client := Client{uuid.Must(uuid.NewV4()).String(), conn}
 	h.mu.Lock()
-	h.clients[client.id] = &client
+	h.clients[client.ID] = &client
 	h.mu.Unlock()
 
 	for {
@@ -50,21 +54,24 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, p, err := conn.ReadMessage()
 		if err != nil {
 
-			// If it's a close error, then delete the Pub/Sub client and close the connection.
+			// If it's a close error, then delete the client and close the connection.
 			if _, ok := err.(*websocket.CloseError); ok {
-				h.closeConn(conn, client.id, websocket.CloseNormalClosure, nil)
+				h.closeConn(conn, client.ID, websocket.CloseNormalClosure, nil)
 				return
 			}
 
 			// Send an internal server error.
 			e := errors.New(err.Error())
-			h.writeMsg(conn, client.id, nil, e, true)
+			h.writeMsg(conn, client.ID, nil, e, true)
 			continue
 		}
 
+		// Convert the payload into an inbound struct.
 		var in inbound
 		if err := json.Unmarshal(p, &in); err != nil {
-			h.writeMsg(conn, client.id, nil, err, false)
+
+			// Send a client error.
+			h.writeMsg(conn, client.ID, nil, err, false)
 			continue
 		}
 
@@ -73,27 +80,33 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fmt.Println("published")
 		case "subscribe":
 			fmt.Println("subscribe")
+		default:
+
+			// Send a client error.
+			h.writeMsg(conn, client.ID, nil, errMustBePubOrSub, false)
+			continue
 		}
 	}
 }
 
-// send writes a binary message (msg and e) to the given WebSocket connection.
+// send writes a binary message to the given WebSocket connection.
 func (h *handler) writeMsg(conn *websocket.Conn, id string, msg []byte, e error, srvErr bool) {
 
 	out := outbound{msg, outboundError{e.Error(), srvErr}}
 
-	// If srvErr is true then the error should be logged and hidden from the client.
+	// If srvErr is true then the error and message should be logged and hidden
+	// from the client.
 	if e != nil && srvErr {
 		h.logger.Warn().Stack().Err(e).Msg("Server error")
 		out.Error.Message = "Internal server error"
 		out.Message = nil
 	}
 
-	// Marshal out, turning the data into bytes.
+	// Convert out into bytes.
 	b, err := json.Marshal(out)
 	if err != nil {
 
-		// Send an internal server error along with the close message (will be logged).
+		// Delete the client and close the connection with an internal server error.
 		e = errors.New(err.Error())
 		h.closeConn(conn, id, websocket.CloseInternalServerErr, e)
 		return
@@ -102,7 +115,7 @@ func (h *handler) writeMsg(conn *websocket.Conn, id string, msg []byte, e error,
 	// Write out to the WebSocket connection.
 	if err := conn.WriteMessage(websocket.BinaryMessage, b); err != nil {
 
-		// If it's a close error, then delete the pubsub client and close the connection.
+		// If it's a close error, then delete the client and close the connection.
 		if _, ok := err.(*websocket.CloseError); ok {
 			h.closeConn(conn, id, websocket.CloseNormalClosure, nil)
 			return
@@ -114,7 +127,8 @@ func (h *handler) writeMsg(conn *websocket.Conn, id string, msg []byte, e error,
 	}
 }
 
-// closeConn closes the given Websocket connection.
+// closeConn closes the given WebSocket connection after sending a close
+// message containing an optional error.
 func (h *handler) closeConn(conn *websocket.Conn, id string, closeCode int, e error) {
 
 	defer conn.Close()
@@ -134,7 +148,7 @@ func (h *handler) closeConn(conn *websocket.Conn, id string, closeCode int, e er
 	err := conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(closeCode, e.Error()), time.Now().Add(5*time.Second))
 	if err != nil {
 
-		// If it's a close error, then delete the pubsub client and close the connection.
+		// If it's a close error, then delete the client and close the connection.
 		if _, ok := err.(*websocket.CloseError); ok {
 			h.logger.Warn().Stack().Err(e).Msg("Server error")
 			return
