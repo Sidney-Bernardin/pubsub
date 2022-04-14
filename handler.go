@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Sidney-Bernardin/pubsub/pubsub"
 	"github.com/gofrs/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/pkg/errors"
@@ -24,13 +25,14 @@ type Client struct {
 
 type handler struct {
 	upgrader *websocket.Upgrader
+	pubsub   *pubsub.Pubsub
 	logger   *zerolog.Logger
 	mu       sync.Mutex
 	clients  map[string]*Client
 }
 
-func NewHandler(upgrader *websocket.Upgrader, logger *zerolog.Logger) *handler {
-	return &handler{upgrader, logger, sync.Mutex{}, map[string]*Client{}}
+func NewHandler(upgrader *websocket.Upgrader, pubsub *pubsub.Pubsub, logger *zerolog.Logger) *handler {
+	return &handler{upgrader, logger, pubsub, sync.Mutex{}, map[string]*Client{}}
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -132,6 +134,9 @@ func (h *handler) writeMsg(conn *websocket.Conn, id string, msg []byte, e error,
 func (h *handler) closeConn(conn *websocket.Conn, id string, closeCode int, e error) {
 
 	defer conn.Close()
+
+	// If the given client is subscribed to a topic, then delete it.
+	h.pubsub.RemoveSubscriber(id)
 
 	if e == nil {
 		e = errors.New("")
