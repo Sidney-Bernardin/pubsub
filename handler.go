@@ -7,11 +7,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Sidney-Bernardin/pubsub/pubsub"
 	"github.com/gofrs/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
+
+	"github.com/Sidney-Bernardin/pshandler/pubsub"
 )
 
 var (
@@ -19,8 +20,12 @@ var (
 )
 
 type Client struct {
-	ID   string
-	Conn *websocket.Conn
+	id   string
+	conn *websocket.Conn
+}
+
+func (c *Client) GetID() string {
+	return c.id
 }
 
 type handler struct {
@@ -32,7 +37,7 @@ type handler struct {
 }
 
 func NewHandler(upgrader *websocket.Upgrader, pubsub *pubsub.Pubsub, logger *zerolog.Logger) *handler {
-	return &handler{upgrader, logger, pubsub, sync.Mutex{}, map[string]*Client{}}
+	return &handler{upgrader, pubsub, logger, sync.Mutex{}, map[string]*Client{}}
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -47,7 +52,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Create and add a new wsClient to the clients map.
 	client := Client{uuid.Must(uuid.NewV4()).String(), conn}
 	h.mu.Lock()
-	h.clients[client.ID] = &client
+	h.clients[client.id] = &client
 	h.mu.Unlock()
 
 	for {
@@ -58,13 +63,13 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 			// If it's a close error, then delete the client and close the connection.
 			if _, ok := err.(*websocket.CloseError); ok {
-				h.closeConn(conn, client.ID, websocket.CloseNormalClosure, nil)
+				h.closeConn(conn, client.id, websocket.CloseNormalClosure, nil)
 				return
 			}
 
 			// Send an internal server error.
 			e := errors.New(err.Error())
-			h.writeMsg(conn, client.ID, nil, e, true)
+			h.writeMsg(conn, client.id, nil, e, true)
 			continue
 		}
 
@@ -73,7 +78,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if err := json.Unmarshal(p, &in); err != nil {
 
 			// Send a client error.
-			h.writeMsg(conn, client.ID, nil, err, false)
+			h.writeMsg(conn, client.id, nil, err, false)
 			continue
 		}
 
@@ -85,7 +90,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		default:
 
 			// Send a client error.
-			h.writeMsg(conn, client.ID, nil, errMustBePubOrSub, false)
+			h.writeMsg(conn, client.id, nil, errMustBePubOrSub, false)
 			continue
 		}
 	}

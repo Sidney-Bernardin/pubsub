@@ -4,17 +4,19 @@ import (
 	"sync"
 
 	"github.com/pkg/errors"
-
-	handler "github.com/Sidney-Bernardin/pubsub"
 )
 
 var (
 	errAlreadySubscribed = errors.New("already subscribed to this topic")
 )
 
+type client interface {
+	GetID() string
+}
+
 type subscription struct {
-	client *handler.Client
-	topic  string
+	client
+	topic string
 }
 
 type Pubsub struct {
@@ -28,16 +30,16 @@ func NewPubsub() *Pubsub {
 
 // AddSubscriber lets the Pub/Sub service know that the given client is
 // subscribed. The given ID should be unique to all added other subscribers.
-func (ps *Pubsub) AddSubscriber(client *handler.Client, topic string) error {
+func (ps *Pubsub) AddSubscriber(c client, topic string) error {
 
 	// Make sure the given ID is unique to the other subscribers.
-	if _, ok := ps.subscriptions[client.ID]; !ok {
+	if _, ok := ps.subscriptions[c.GetID()]; !ok {
 		return errAlreadySubscribed
 	}
 
 	// Create and add a new subscriber to the subscribers map.
 	ps.mu.Lock()
-	ps.subscriptions[client.ID] = &subscription{client, topic}
+	ps.subscriptions[c.GetID()] = &subscription{c, topic}
 	ps.mu.Unlock()
 
 	return nil
