@@ -1,4 +1,4 @@
-package handler
+package pshandler
 
 type inbound struct {
 	Action  string `json:"action"`
