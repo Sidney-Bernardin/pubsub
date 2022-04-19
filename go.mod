@@ -1,4 +1,4 @@
-module github.com/Sidney-Bernardin/pshandler
+module github.com/Sidney-Bernardin/pubsub
 
 go 1.18
 
