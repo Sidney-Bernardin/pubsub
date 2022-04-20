@@ -2,7 +2,6 @@ package pubsub
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -14,8 +13,14 @@ import (
 )
 
 var (
-	errMustBePubOrSub = errors.New("action must be publish or subscribe")
+	errMustBePubOrSub    = errors.New("action must be publish or subscribe")
+	errAlreadySubscribed = errors.New("already subscribed to this topic")
 )
+
+type subscription struct {
+	c     *client
+	topic string
+}
 
 type client struct {
 	id   string
@@ -30,20 +35,20 @@ func newClient(conn *websocket.Conn, name string) *client {
 }
 
 type handler struct {
-	upgrader *websocket.Upgrader
-	logger   *zerolog.Logger
-	mu       sync.Mutex
-	pubsub   *pubsub
-	clients  map[string]*client
+	upgrader      *websocket.Upgrader
+	logger        *zerolog.Logger
+	mu            sync.Mutex
+	clients       map[string]*client
+	subscriptions map[string]*subscription
 }
 
 func NewHandler(upgrader *websocket.Upgrader, logger *zerolog.Logger) *handler {
 	return &handler{
-		upgrader: upgrader,
-		logger:   logger,
-		mu:       sync.Mutex{},
-		pubsub:   &pubsub{},
-		clients:  map[string]*client{},
+		upgrader:      upgrader,
+		logger:        logger,
+		mu:            sync.Mutex{},
+		clients:       map[string]*client{},
+		subscriptions: map[string]*subscription{},
 	}
 }
 
@@ -52,7 +57,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Upgrade the HTTP connection to the WebSocket protocol.
 	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -64,7 +69,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	for {
 
-		// Listen for inbound messages with the connection.
+		// Listen for inbound messages.
 		_, p, err := conn.ReadMessage()
 		if err != nil {
 
@@ -80,23 +85,38 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Convert the payload into an inbound struct.
+		// Decode the payload.
 		var in inbound
 		if err := json.Unmarshal(p, &in); err != nil {
 
-			// Send a client error.
+			// Send the error.
 			h.writeMsg(conn, client.id, nil, err, false)
 			continue
 		}
 
 		switch in.Action {
 		case "publish":
-			fmt.Println("published")
+			h.logger.Info().Str("id", client.id).Str("topic", in.Topic).Msgf("New subscriber")
 		case "subscribe":
-			fmt.Println("subscribe")
+
+			// Make sure the given ID is unique to the other subscribers.
+			if _, ok := h.subscriptions[client.id]; ok {
+
+				// Send an error.
+				h.writeMsg(conn, client.id, nil, errAlreadySubscribed, false)
+				continue
+			}
+
+			// Create and add a new subscriber to the subscribers map.
+			h.mu.Lock()
+			h.subscriptions[client.id] = &subscription{client, in.Topic}
+			h.mu.Unlock()
+
+			h.logger.Info().Str("id", client.id).Str("topic", in.Topic).Msgf("New subscriber")
+
 		default:
 
-			// Send a client error.
+			// Send an error.
 			h.writeMsg(conn, client.id, nil, errMustBePubOrSub, false)
 			continue
 		}
@@ -116,20 +136,20 @@ func (h *handler) writeMsg(conn *websocket.Conn, id string, msg []byte, e error,
 		out.Message = nil
 	}
 
-	// Convert out into bytes.
+	// Encode out.
 	b, err := json.Marshal(out)
 	if err != nil {
 
-		// Delete the client and close the connection with an internal server error.
+		// Send an internal server error.
 		e = errors.New(err.Error())
-		h.closeConn(conn, id, websocket.CloseInternalServerErr, e)
+		h.writeMsg(conn, id, nil, e, true)
 		return
 	}
 
-	// Write out to the WebSocket connection.
-	if err := conn.WriteMessage(websocket.BinaryMessage, b); err != nil {
+	// Write to the WebSocket connection.
+	if err := conn.WriteMessage(websocket.TextMessage, b); err != nil {
 
-		// If it's a close error, then delete the client and close the connection.
+		// If it's a close sent error, then delete the client and close the connection.
 		if err == websocket.ErrCloseSent {
 			h.closeConn(conn, id, websocket.CloseNormalClosure, nil)
 			return
@@ -145,8 +165,10 @@ func (h *handler) writeMsg(conn *websocket.Conn, id string, msg []byte, e error,
 // message containing an optional error.
 func (h *handler) closeConn(conn *websocket.Conn, id string, closeCode int, e error) {
 
-	// If the given client is subscribed to a topic, then delete it.
-	h.pubsub.RemoveSubscriber(id)
+	// If the client has a subscription, then remove it from the map.
+	if _, ok := h.subscriptions[id]; ok {
+		delete(h.subscriptions, id)
+	}
 
 	if e == nil {
 		e = errors.New("")
