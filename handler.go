@@ -1,186 +1,135 @@
 package pubsub
 
 import (
-	"encoding/json"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/gofrs/uuid"
+	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 	"github.com/pkg/errors"
-	"github.com/rs/zerolog"
 )
 
-var (
-	errMustBePubOrSub    = errors.New("action must be publish or subscribe")
-	errAlreadySubscribed = errors.New("already subscribed to this topic")
-)
-
-type subscription struct {
-	c     *client
-	topic string
+// topic is simply a wraper for it's broadcast channel giving broadcastChan a
+// way to count it's listeners.
+type topic struct {
+	listenerCount int
+	broadcastChan chan *websocket.PreparedMessage
 }
 
-type client struct {
-	id   string
-	conn *websocket.Conn
+// closeConn closes the given WebSocket connection.
+func closeConn(conn *websocket.Conn, closeCode int) {
+	d := websocket.FormatCloseMessage(closeCode, "")
+	_ = conn.WriteControl(websocket.CloseMessage, d, time.Now().Add(1*time.Second))
 }
 
-func newClient(conn *websocket.Conn, name string) *client {
-	return &client{
-		id:   name + "-" + uuid.Must(uuid.NewV4()).String(),
-		conn: conn,
-	}
-}
+func Handler(upgrader *websocket.Upgrader, eventChan chan Event) http.HandlerFunc {
 
-type handler struct {
-	upgrader      *websocket.Upgrader
-	logger        *zerolog.Logger
-	mu            sync.Mutex
-	clients       map[string]*client
-	subscriptions map[string]*subscription
-}
+	// Keep track of all topics.
+	topics := map[string]*topic{}
 
-func NewHandler(upgrader *websocket.Upgrader, logger *zerolog.Logger) *handler {
-	return &handler{
-		upgrader:      upgrader,
-		logger:        logger,
-		mu:            sync.Mutex{},
-		clients:       map[string]*client{},
-		subscriptions: map[string]*subscription{},
-	}
-}
+	return func(w http.ResponseWriter, r *http.Request) {
 
-func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+		// Get the topic and the client type from the URL.
+		topic_name := mux.Vars(r)["topic_name"]
+		clientType := mux.Vars(r)["client_type"]
 
-	// Upgrade the HTTP connection to the WebSocket protocol.
-	conn, err := h.upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	// Create a new client, then add it to the clients map.
-	client := newClient(conn, r.Header.Get("name"))
-	h.mu.Lock()
-	h.clients[client.id] = client
-	h.mu.Unlock()
-
-	for {
-
-		// Listen for inbound messages.
-		_, p, err := conn.ReadMessage()
-		if err != nil {
-
-			// If it's a close error, then delete the client and close the connection.
-			if _, ok := err.(*websocket.CloseError); ok {
-				h.closeConn(conn, client.id, websocket.CloseNormalClosure, nil)
-				return
-			}
-
-			// Send an internal server error.
-			e := errors.New(err.Error())
-			h.writeMsg(conn, client.id, nil, e, true)
-			continue
-		}
-
-		// Decode the payload.
-		var in inbound
-		if err := json.Unmarshal(p, &in); err != nil {
-
-			// Send the error.
-			h.writeMsg(conn, client.id, nil, err, false)
-			continue
-		}
-
-		switch in.Action {
-		case "publish":
-			h.logger.Info().Str("id", client.id).Str("topic", in.Topic).Msgf("New subscriber")
-		case "subscribe":
-
-			// Make sure the given ID is unique to the other subscribers.
-			if _, ok := h.subscriptions[client.id]; ok {
-
-				// Send an error.
-				h.writeMsg(conn, client.id, nil, errAlreadySubscribed, false)
-				continue
-			}
-
-			// Create and add a new subscriber to the subscribers map.
-			h.mu.Lock()
-			h.subscriptions[client.id] = &subscription{client, in.Topic}
-			h.mu.Unlock()
-
-			h.logger.Info().Str("id", client.id).Str("topic", in.Topic).Msgf("New subscriber")
-
-		default:
-
-			// Send an error.
-			h.writeMsg(conn, client.id, nil, errMustBePubOrSub, false)
-			continue
-		}
-	}
-}
-
-// send writes a binary message to the given WebSocket connection.
-func (h *handler) writeMsg(conn *websocket.Conn, id string, msg []byte, e error, srvErr bool) {
-
-	out := outbound{msg, outboundError{e.Error(), srvErr}}
-
-	// If srvErr is true then the error and message should be logged and hidden
-	// from the client.
-	if e != nil && srvErr {
-		h.logger.Warn().Stack().Err(e).Msg("Server error")
-		out.Error.Message = "Internal server error"
-		out.Message = nil
-	}
-
-	// Encode out.
-	b, err := json.Marshal(out)
-	if err != nil {
-
-		// Send an internal server error.
-		e = errors.New(err.Error())
-		h.writeMsg(conn, id, nil, e, true)
-		return
-	}
-
-	// Write to the WebSocket connection.
-	if err := conn.WriteMessage(websocket.TextMessage, b); err != nil {
-
-		// If it's a close sent error, then delete the client and close the connection.
-		if err == websocket.ErrCloseSent {
-			h.closeConn(conn, id, websocket.CloseNormalClosure, nil)
+		// Make sure that the client type is publisher or subscriber.
+		if clientType != "publisher" && clientType != "subscriber" {
+			http.Error(w, "client_type must be publisher or subscriber", http.StatusBadRequest)
 			return
 		}
 
-		// Log as an internal server error.
-		e = errors.New(err.Error())
-		h.logger.Warn().Stack().Err(e).Msg("Server error")
+		// Upgrade the HTTP connection to the WebSocket protocol.
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		// If topic_name dose not have a topic mapped to it, then map on to it.
+		if _, ok := topics[topic_name]; !ok {
+			topics[topic_name] = &topic{0, make(chan *websocket.PreparedMessage)}
+		}
+
+		// Generate an ID for the WebSocket connection and get the mapped topic for topic_name.
+		id := r.Header.Get("servie_name") + "-" + uuid.Must(uuid.NewV4()).String()
+		mappedTopic := topics[topic_name]
+
+		switch clientType {
+		case "publisher":
+
+			eventChan <- Event{id, topic_name, clientType, nil, EventTypeNewPublisher}
+
+			// Forever listen for inbound WebSocket messages, then send them
+			// through mappedTopic's broadcast channel.
+			for {
+
+				// Listen for inbound WebSocket messages.
+				msgType, p, err := conn.ReadMessage()
+				if err != nil {
+
+					// If the error is a close error, then return.
+					if _, ok := err.(*websocket.CloseError); ok {
+						return
+					}
+
+					// Close the connection and send the internal server error
+					// through the event channel.
+					e := errors.Wrap(err, "Cannot listen for inbound WebSocket messages")
+					eventChan <- Event{id, topic_name, clientType, e, EventTypeInternalServerError}
+					closeConn(conn, websocket.CloseInternalServerErr)
+					return
+				}
+
+				// Turn the payload into a prepared message.
+				msg, err := websocket.NewPreparedMessage(msgType, p)
+				if err != nil {
+
+					// Close the connection and send the internal server error
+					// through the event channel.
+					e := errors.Wrap(err, "Cannot listen for inbound WebSocket messages")
+					eventChan <- Event{id, topic_name, clientType, e, EventTypeInternalServerError}
+					closeConn(conn, websocket.CloseInternalServerErr)
+					return
+				}
+
+				// Send the message to each listener of mappedTopic's broadcast channel.
+				for i := 0; i < mappedTopic.listenerCount; i++ {
+					mappedTopic.broadcastChan <- msg
+				}
+			}
+
+		case "subscriber":
+
+			// Add 1 to mappedTopic's listenerCount and remove 1 from it before returning.
+			mappedTopic.listenerCount++
+			defer func() { mappedTopic.listenerCount-- }()
+
+			eventChan <- Event{id, topic_name, clientType, nil, EventTypeNewSubscriber}
+
+			// Forever listen for inbound messages from mappedTopic's broadcast
+			// channel, then write them to the WebSocket connection.
+			for {
+
+				msg := <-mappedTopic.broadcastChan
+
+				// Write the message to the WebSocket connection.
+				if err := conn.WritePreparedMessage(msg); err != nil {
+
+					// If the error is a close sent error, then return.
+					if err == websocket.ErrCloseSent {
+						return
+					}
+
+					// Close the connection and send the internal server error
+					// through the event channel.
+					e := errors.Wrap(err, "Cannot write message to WebSocket connection")
+					eventChan <- Event{id, topic_name, clientType, e, EventTypeInternalServerError}
+					closeConn(conn, websocket.CloseInternalServerErr)
+					return
+				}
+			}
+		}
 	}
-}
-
-// closeConn closes the given WebSocket connection after sending a close
-// message containing an optional error.
-func (h *handler) closeConn(conn *websocket.Conn, id string, closeCode int, e error) {
-
-	// If the client has a subscription, then remove it from the map.
-	if _, ok := h.subscriptions[id]; ok {
-		delete(h.subscriptions, id)
-	}
-
-	if e == nil {
-		e = errors.New("")
-	}
-
-	// If an InternalServerErr is being sent then the error should be logged
-	// and hidden from the client.
-	if closeCode == websocket.CloseInternalServerErr {
-		h.logger.Warn().Stack().Err(e).Msg("Server error")
-		e = errors.New("Internal server error")
-	}
-
-	// Write a close message to the WebSocket connection.
-	_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(closeCode, e.Error()), time.Now().Add(5*time.Second))
 }
