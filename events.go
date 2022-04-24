@@ -3,7 +3,9 @@ package pubsub
 const (
 	EventTypeNewPublisher        = 0
 	EventTypeNewSubscriber       = 1
-	EventTypeInternalServerError = 2
+	EventTypePublisherLeft       = 2
+	EventTypeSubscriberLeft      = 3
+	EventTypeInternalServerError = 4
 )
 
 type Event struct {

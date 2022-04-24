@@ -1,7 +1,9 @@
 package pubsub
 
 import (
+	"context"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gofrs/uuid"
@@ -10,8 +12,8 @@ import (
 	"github.com/pkg/errors"
 )
 
-// topic is simply a wraper for it's broadcast channel giving broadcastChan a
-// way to count it's listeners.
+// topic is simply a wraper for it's broadcast channel giving the broadcast
+// channel a way to count it's listeners.
 type topic struct {
 	listenerCount int
 	broadcastChan chan *websocket.PreparedMessage
@@ -23,7 +25,20 @@ func closeConn(conn *websocket.Conn, closeCode int) {
 	_ = conn.WriteControl(websocket.CloseMessage, d, time.Now().Add(1*time.Second))
 }
 
+// waitForDisconnect calls cancel when the WebSocket connection closes.
+func waitForDisconnect(conn *websocket.Conn, cancel context.CancelFunc) {
+	for {
+		_, _, err := conn.ReadMessage()
+		if err != nil {
+			cancel()
+			return
+		}
+	}
+}
+
 func Handler(upgrader *websocket.Upgrader, eventChan chan Event) http.HandlerFunc {
+
+	mu := sync.Mutex{}
 
 	// Keep track of all topics.
 	topics := map[string]*topic{}
@@ -52,12 +67,16 @@ func Handler(upgrader *websocket.Upgrader, eventChan chan Event) http.HandlerFun
 			topics[topic_name] = &topic{0, make(chan *websocket.PreparedMessage)}
 		}
 
-		// Generate an ID for the WebSocket connection and get the mapped topic for topic_name.
+		// Generate an ID for the WebSocket client and get the mapped topic for topic_name.
 		id := r.Header.Get("servie_name") + "-" + uuid.Must(uuid.NewV4()).String()
 		mappedTopic := topics[topic_name]
 
 		switch clientType {
 		case "publisher":
+
+			defer func() {
+				eventChan <- Event{id, topic_name, clientType, nil, EventTypePublisherLeft}
+			}()
 
 			eventChan <- Event{id, topic_name, clientType, nil, EventTypeNewPublisher}
 
@@ -88,7 +107,7 @@ func Handler(upgrader *websocket.Upgrader, eventChan chan Event) http.HandlerFun
 
 					// Close the connection and send the internal server error
 					// through the event channel.
-					e := errors.Wrap(err, "Cannot listen for inbound WebSocket messages")
+					e := errors.Wrap(err, "Cannot prepare new WebSocket message")
 					eventChan <- Event{id, topic_name, clientType, e, EventTypeInternalServerError}
 					closeConn(conn, websocket.CloseInternalServerErr)
 					return
@@ -102,32 +121,58 @@ func Handler(upgrader *websocket.Upgrader, eventChan chan Event) http.HandlerFun
 
 		case "subscriber":
 
-			// Add 1 to mappedTopic's listenerCount and remove 1 from it before returning.
+			defer func() {
+
+				// Remove 1 from mappedTopic's listener count.
+				mu.Lock()
+				mappedTopic.listenerCount--
+				mu.Unlock()
+
+				// If mappedTopic has no listeners, then remove it from the topics map.
+				if mappedTopic.listenerCount == 0 {
+					if _, ok := topics[topic_name]; ok {
+						delete(topics, topic_name)
+					}
+				}
+
+				eventChan <- Event{id, topic_name, clientType, nil, EventTypeSubscriberLeft}
+			}()
+
+			// Add 1 to mappedTopic's listener count.
+			mu.Lock()
 			mappedTopic.listenerCount++
-			defer func() { mappedTopic.listenerCount-- }()
+			mu.Unlock()
 
 			eventChan <- Event{id, topic_name, clientType, nil, EventTypeNewSubscriber}
 
-			// Forever listen for inbound messages from mappedTopic's broadcast
-			// channel, then write them to the WebSocket connection.
+			// In another go routine, wait for the WebSocket connection to close.
+			ctx, cancel := context.WithCancel(context.Background())
+			go waitForDisconnect(conn, cancel)
+
+			// Listens for inbound messages from mappedTopic's broadcast
+			// channel, then writing them to the WebSocket client. Returns when
+			// ctx is done.
 			for {
+				select {
+				case <-ctx.Done():
+					return
+				case msg := <-mappedTopic.broadcastChan:
 
-				msg := <-mappedTopic.broadcastChan
+					// Write the message to the WebSocket client.
+					if err := conn.WritePreparedMessage(msg); err != nil {
 
-				// Write the message to the WebSocket connection.
-				if err := conn.WritePreparedMessage(msg); err != nil {
+						// If the error is a close sent error, then return.
+						if err == websocket.ErrCloseSent {
+							return
+						}
 
-					// If the error is a close sent error, then return.
-					if err == websocket.ErrCloseSent {
+						// Close the connection and send the internal server error
+						// through the event channel.
+						e := errors.Wrap(err, "Cannot write message to WebSocket client")
+						eventChan <- Event{id, topic_name, clientType, e, EventTypeInternalServerError}
+						closeConn(conn, websocket.CloseInternalServerErr)
 						return
 					}
-
-					// Close the connection and send the internal server error
-					// through the event channel.
-					e := errors.Wrap(err, "Cannot write message to WebSocket connection")
-					eventChan <- Event{id, topic_name, clientType, e, EventTypeInternalServerError}
-					closeConn(conn, websocket.CloseInternalServerErr)
-					return
 				}
 			}
 		}

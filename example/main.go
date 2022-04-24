@@ -62,8 +62,14 @@ func main() {
 			case pubsub.EventTypeNewSubscriber:
 				logEvent = logger.Info()
 				msg = "New subscriber"
+			case pubsub.EventTypePublisherLeft:
+				logEvent = logger.Info()
+				msg = "Publisher left"
+			case pubsub.EventTypeSubscriberLeft:
+				logEvent = logger.Info()
+				msg = "Subscriber left"
 			case pubsub.EventTypeInternalServerError:
-				logEvent = logger.Warn()
+				logEvent = logger.Warn().Err(e.Error)
 				msg = "Internal Server Error"
 			}
 
