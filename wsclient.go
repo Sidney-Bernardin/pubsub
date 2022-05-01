@@ -8,6 +8,7 @@ import (
 	"github.com/pkg/errors"
 )
 
+// wsClient reading and pinging for a given WebSocket connection.
 type wsClient struct {
 	id      string
 	conn    *websocket.Conn
@@ -16,6 +17,7 @@ type wsClient struct {
 	cancel  context.CancelFunc
 }
 
+// newWSClient returns a pointer to a wsClient.
 func newWSClient(conn *websocket.Conn, name string, cancel context.CancelFunc) *wsClient {
 	return &wsClient{
 		id:      name + "-" + uuid.Must(uuid.NewV4()).String(),
@@ -26,36 +28,44 @@ func newWSClient(conn *websocket.Conn, name string, cancel context.CancelFunc) *
 	}
 }
 
+// read forever listens for WebSocket message from the client. If an error
+// occurs during the process, the function will return and c.cancel wll be called.
 func (c *wsClient) read(ignoreMsg bool) {
+
+	// Before returning, call c.cancel.
+	defer c.cancel()
+
 	for {
+
+		// Listen for WebSocket message from the client.
 		msgType, payload, err := c.conn.ReadMessage()
 		if err != nil {
 
+			// If it's a close error, return.
 			if _, ok := err.(*websocket.CloseError); ok {
-				c.cancel()
 				return
 			}
 
+			// Send the error through c.errChan and close the WebSocket connection.
 			c.errChan <- errors.Wrap(err, "cannot listen for WebSocket messages")
 			c.conn.Close()
-			c.cancel()
 			return
 		}
 
 		if !ignoreMsg {
+
+			// Turn the payload into a new prepared WebSocket message.
 			msg, err := websocket.NewPreparedMessage(msgType, payload)
 			if err != nil {
+
+				// Send the error through c.errChan and close the WebSocket connection.
 				c.errChan <- errors.Wrap(err, "cannot prepare WebSocket message")
 				c.conn.Close()
-				c.cancel()
 				return
 			}
 
+			// Send the message through c.msgChan.
 			c.msgChan <- msg
 		}
 	}
-}
-
-func ping() {
-
 }
