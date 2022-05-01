@@ -8,7 +8,7 @@ import (
 	"github.com/pkg/errors"
 )
 
-// wsClient reading and pinging for a given WebSocket connection.
+// wsClient handles reading and pinging for a given WebSocket connection.
 type wsClient struct {
 	id      string
 	conn    *websocket.Conn
