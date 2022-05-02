@@ -2,6 +2,7 @@ package pubsub
 
 import (
 	"context"
+	"time"
 
 	"github.com/gofrs/uuid"
 	"github.com/gorilla/websocket"
@@ -34,8 +35,10 @@ func newWSClient(ctx context.Context, conn *websocket.Conn, name string) *wsClie
 	}
 }
 
-// read forever listens for WebSocket message from the client. If an error
-// occurs during the process, the function will return and c.cancel wll be called.
+// read forever listens for WebSocket message from the client. If ignoreMsg is
+// false, the message will be send through wsClient.msgChan. If an error
+// occurs, the error will be sent through wsClient.errChan, the WebSocket
+// connection will close, and all wsClient functions will be canceled.
 func (c *wsClient) read(ignoreMsg bool) {
 
 	// Before returning, call c.cancel.
@@ -81,6 +84,52 @@ func (c *wsClient) read(ignoreMsg bool) {
 
 				// Send the message through c.msgChan.
 				c.msgChan <- msg
+			}
+		}
+	}
+}
+
+// ping writes WebSocket ping messages to the client. Frequency is how
+// often a ping should be written, and timeout is the max time it should take
+// for a pong message to be recived.
+func (c *wsClient) ping(timeout, frequency time.Duration) {
+
+	// Before returning, call c.cancel.
+	defer c.cancel()
+
+	// lastPong is the time when the last pong message was recived.
+	lastPong := time.Now()
+
+	// Set the pong handler to a function that resets lastPong to the current time.
+	c.conn.SetPongHandler(func(_ string) error {
+		lastPong = time.Now()
+		return nil
+	})
+
+	// Create a ticker.
+	ticker := time.NewTicker(frequency)
+
+	for {
+		select {
+
+		// When c.ctx is done, return.
+		case <-c.ctx.Done():
+			return
+
+		// When a tick is sent through ticker.C, ping the client.
+		case <-ticker.C:
+
+			// If the pong didn't come soon enough, return.
+			if time.Now().Sub(lastPong) > timeout {
+				c.conn.Close()
+				return
+			}
+
+			// Write a WebSocket ping message to the client.
+			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				c.errChan <- errors.Wrap(err, "cannot write WebSocket ping message")
+				c.conn.Close()
+				return
 			}
 		}
 	}

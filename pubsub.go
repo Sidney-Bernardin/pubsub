@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/pkg/errors"
@@ -41,7 +42,7 @@ func PubSub(ctx context.Context, upgrader *websocket.Upgrader, eventChan chan *E
 			return
 		}
 
-		// Create a wsClient. It helps handle the WebSocket connection.
+		// Create a wsClient. It helps with reading and pinging for the WebSocket connection.
 		client := newWSClient(ctx, conn, r.Header.Get("service_name"))
 
 		// Check if topicName has a corresponding topic, if it dosn't, create one.
@@ -63,9 +64,10 @@ func PubSub(ctx context.Context, upgrader *websocket.Upgrader, eventChan chan *E
 			// Send an event.
 			eventChan <- &Event{client.id, topicName, clientType, nil, EventTypeNewPublisher}
 
-			// Read WebSocket messages from the client in another goroutine and
-			// send the through client.msgChan.
+			// Read WebSocket messages from the client in another goroutine,
+			// false means the messages will be sent through client.msgChan.
 			go client.read(false)
+			go client.ping(2*time.Second, 5*time.Second)
 
 			for {
 				select {
@@ -118,8 +120,9 @@ func PubSub(ctx context.Context, upgrader *websocket.Upgrader, eventChan chan *E
 			eventChan <- &Event{client.id, topicName, clientType, nil, EventTypeNewSubscriber}
 
 			// Read WebSocket messages from the client in another goroutine,
-			// but don't sent them through client.msgChan.
+			// true means the messages will be ignored.
 			go client.read(true)
+			go client.ping(2*time.Second, 5*time.Second)
 
 			for {
 				select {
@@ -137,8 +140,13 @@ func PubSub(ctx context.Context, upgrader *websocket.Upgrader, eventChan chan *E
 				// the message with the WebSocket connection.
 				case msg := <-mappedTopic.msgChan:
 
-					// Write the message to the WebSocket connection.
+					// Write the message to the client.
 					if err := conn.WritePreparedMessage(msg); err != nil {
+
+						// If it's a close sent error, return.
+						if err == websocket.ErrCloseSent {
+							return
+						}
 
 						// Close the WebSocket connection and send an internal-server-error event.
 						conn.Close()

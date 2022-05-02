@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"os/signal"
@@ -23,9 +24,10 @@ func main() {
 	// Create a router.
 	r := mux.NewRouter()
 
-	// Setup a Pub/Sub handler.
+	// Create a Pub/Sub handler.
 	events := make(chan *pubsub.Event)
-	r.Handle("/{topic_name}", pubsub.PubSub(&websocket.Upgrader{}, events))
+	ctx := context.Background()
+	r.Handle("/{topic_name}", pubsub.PubSub(ctx, &websocket.Upgrader{}, events))
 
 	// Get the optional port from an environment variable.
 	port, ok := os.LookupEnv("PORT")
@@ -52,7 +54,8 @@ func main() {
 		select {
 
 		// When an OS signal is sent through the signals channel, return.
-		case <-signals:
+		case s := <-signals:
+			logger.Info().Str("signal", s.String()).Msgf("Smooth shutdown")
 			return
 
 		// When an event is sent through the events channel, log the event.
