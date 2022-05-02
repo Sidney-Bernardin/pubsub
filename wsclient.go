@@ -14,16 +14,22 @@ type wsClient struct {
 	conn    *websocket.Conn
 	msgChan chan *websocket.PreparedMessage
 	errChan chan error
+	ctx     context.Context
 	cancel  context.CancelFunc
 }
 
 // newWSClient returns a pointer to a wsClient.
-func newWSClient(conn *websocket.Conn, name string, cancel context.CancelFunc) *wsClient {
+func newWSClient(ctx context.Context, conn *websocket.Conn, name string) *wsClient {
+
+	// Give the given context a cancel function.
+	newCTX, cancel := context.WithCancel(ctx)
+
 	return &wsClient{
 		id:      name + "-" + uuid.Must(uuid.NewV4()).String(),
 		conn:    conn,
 		msgChan: make(chan *websocket.PreparedMessage),
 		errChan: make(chan error),
+		ctx:     newCTX,
 		cancel:  cancel,
 	}
 }
@@ -52,20 +58,30 @@ func (c *wsClient) read(ignoreMsg bool) {
 			return
 		}
 
-		if !ignoreMsg {
+		select {
 
-			// Turn the payload into a new prepared WebSocket message.
-			msg, err := websocket.NewPreparedMessage(msgType, payload)
-			if err != nil {
+		// When c.ctx is done, return.
+		case <-c.ctx.Done():
+			return
 
-				// Send the error through c.errChan and close the WebSocket connection.
-				c.errChan <- errors.Wrap(err, "cannot prepare WebSocket message")
-				c.conn.Close()
-				return
+		// Default to sending the message through c.msgChan.
+		default:
+
+			if !ignoreMsg {
+
+				// Turn the payload into a new prepared WebSocket message.
+				msg, err := websocket.NewPreparedMessage(msgType, payload)
+				if err != nil {
+
+					// Send the error through c.errChan and close the WebSocket connection.
+					c.errChan <- errors.Wrap(err, "cannot prepare WebSocket message")
+					c.conn.Close()
+					return
+				}
+
+				// Send the message through c.msgChan.
+				c.msgChan <- msg
 			}
-
-			// Send the message through c.msgChan.
-			c.msgChan <- msg
 		}
 	}
 }

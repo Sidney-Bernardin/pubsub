@@ -10,7 +10,7 @@ import (
 )
 
 // PubSub returns an HTTP handler function that acts as a WebSocket based Pub/Sub service.
-func PubSub(upgrader *websocket.Upgrader, eventChan chan *Event) http.HandlerFunc {
+func PubSub(ctx context.Context, upgrader *websocket.Upgrader, eventChan chan *Event) http.HandlerFunc {
 
 	mu := sync.Mutex{}
 
@@ -42,8 +42,7 @@ func PubSub(upgrader *websocket.Upgrader, eventChan chan *Event) http.HandlerFun
 		}
 
 		// Create a wsClient. It helps handle the WebSocket connection.
-		ctx, cancel := context.WithCancel(context.Background())
-		client := newWSClient(conn, r.Header.Get("service_name"), cancel)
+		client := newWSClient(ctx, conn, r.Header.Get("service_name"))
 
 		// Check if topicName has a corresponding topic, if it dosn't, create one.
 		if _, ok := topics[topicName]; !ok {
@@ -71,8 +70,8 @@ func PubSub(upgrader *websocket.Upgrader, eventChan chan *Event) http.HandlerFun
 			for {
 				select {
 
-				// When the context is done, return.
-				case <-ctx.Done():
+				// When client.ctx is done, return.
+				case <-client.ctx.Done():
 					return
 
 				// When an error is sent through client.errChan, send an
@@ -85,7 +84,7 @@ func PubSub(upgrader *websocket.Upgrader, eventChan chan *Event) http.HandlerFun
 				case msg := <-client.msgChan:
 
 					// For each listener of mappedTopic.msgChan, send
-					// the message to the channel.
+					// the message through the channel.
 					for i := 0; i < mappedTopic.listenerCount; i++ {
 						mappedTopic.msgChan <- msg
 					}
