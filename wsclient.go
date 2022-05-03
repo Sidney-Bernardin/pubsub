@@ -2,6 +2,7 @@ package pubsub
 
 import (
 	"context"
+	"net"
 	"time"
 
 	"github.com/gofrs/uuid"
@@ -55,6 +56,12 @@ func (c *wsClient) read(ignoreMsg bool) {
 				return
 			}
 
+			// If it's a timeout error, close the WebSocket connection and return.
+			if err, ok := err.(net.Error); ok && err.Timeout() {
+				c.conn.Close()
+				return
+			}
+
 			// Send the error through c.errChan and close the WebSocket connection.
 			c.errChan <- errors.Wrap(err, "cannot listen for WebSocket messages")
 			c.conn.Close()
@@ -89,7 +96,7 @@ func (c *wsClient) read(ignoreMsg bool) {
 	}
 }
 
-// ping writes WebSocket ping messages to the client. Frequency is how
+// ping writes WebSocket ping messages to the client. frequency is how
 // often a ping should be written, and timeout is the max time it should take
 // for a pong message to be recived.
 func (c *wsClient) ping(timeout, frequency time.Duration) {
@@ -97,13 +104,9 @@ func (c *wsClient) ping(timeout, frequency time.Duration) {
 	// Before returning, call c.cancel.
 	defer c.cancel()
 
-	// lastPong is the time when the last pong message was recived.
-	lastPong := time.Now()
-
-	// Set the pong handler to a function that resets lastPong to the current time.
-	c.conn.SetPongHandler(func(_ string) error {
-		lastPong = time.Now()
-		return nil
+	// Make the pong handler set a read deadline for the WebSocket connection.
+	c.conn.SetPongHandler(func(string) error {
+		return c.conn.SetReadDeadline(time.Now().Add(timeout))
 	})
 
 	// Create a ticker.
@@ -119,14 +122,15 @@ func (c *wsClient) ping(timeout, frequency time.Duration) {
 		// When a tick is sent through ticker.C, ping the client.
 		case <-ticker.C:
 
-			// If the pong didn't come soon enough, return.
-			if time.Now().Sub(lastPong) > timeout {
-				c.conn.Close()
-				return
-			}
-
 			// Write a WebSocket ping message to the client.
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+
+				// If it's a close sent error, return.
+				if err == websocket.ErrCloseSent {
+					return
+				}
+
+				// Send the error through c.errChan and close the WebSocket connection.
 				c.errChan <- errors.Wrap(err, "cannot write WebSocket ping message")
 				c.conn.Close()
 				return
