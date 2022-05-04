@@ -67,7 +67,7 @@ func PubSub(ctx context.Context, upgrader *websocket.Upgrader, eventChan chan *E
 			// Read WebSocket messages from the client in another goroutine,
 			// false means the messages will be sent through client.msgChan.
 			go client.read(false)
-			go client.ping(2*time.Second, 5*time.Second)
+			go client.ping(5*time.Second, 2*time.Second)
 
 			for {
 				select {
@@ -122,7 +122,7 @@ func PubSub(ctx context.Context, upgrader *websocket.Upgrader, eventChan chan *E
 			// Read WebSocket messages from the client in another goroutine,
 			// true means the messages will be ignored.
 			go client.read(true)
-			go client.ping(2*time.Second, 5*time.Second)
+			go client.ping(5*time.Second, 2*time.Second)
 
 			for {
 				select {

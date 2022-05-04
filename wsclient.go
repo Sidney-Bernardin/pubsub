@@ -47,7 +47,7 @@ func (c *wsClient) read(ignoreMsg bool) {
 
 	for {
 
-		// Listen for WebSocket message from the client.
+		// Listen for WebSocket messages from the client.
 		msgType, payload, err := c.conn.ReadMessage()
 		if err != nil {
 
