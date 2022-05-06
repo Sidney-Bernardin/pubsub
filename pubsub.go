@@ -11,7 +11,7 @@ import (
 )
 
 // PubSub returns an HTTP handler function that acts as a WebSocket based Pub/Sub service.
-func PubSub(ctx context.Context, upgrader *websocket.Upgrader, eventChan chan *Event) http.HandlerFunc {
+func PubSub(ctx context.Context, upgrader *websocket.Upgrader, eventChan chan *Event, pongTimeout time.Duration) http.HandlerFunc {
 
 	mu := sync.Mutex{}
 
@@ -20,8 +20,8 @@ func PubSub(ctx context.Context, upgrader *websocket.Upgrader, eventChan chan *E
 
 	return func(w http.ResponseWriter, r *http.Request) {
 
-		// Get the topic name from the URL and the client type from the headers.
-		topicName := r.URL.EscapedPath()
+		// Get the topic name and the client type from the headers.
+		topicName := r.Header.Get("topic")
 		clientType := r.Header.Get("client_type")
 
 		// Make sure the client type is publisher or a subscriber.
@@ -43,7 +43,7 @@ func PubSub(ctx context.Context, upgrader *websocket.Upgrader, eventChan chan *E
 		}
 
 		// Create a wsClient. It helps with reading and pinging for the WebSocket connection.
-		client := newWSClient(ctx, conn, r.Header.Get("service_name"))
+		client := newWSClient(ctx, conn, r.Header.Get("service_name"), pongTimeout)
 
 		// Check if topicName has a corresponding topic, if it dosn't, create one.
 		if _, ok := topics[topicName]; !ok {
@@ -128,7 +128,7 @@ func PubSub(ctx context.Context, upgrader *websocket.Upgrader, eventChan chan *E
 				select {
 
 				// When the context is done, return.
-				case <-ctx.Done():
+				case <-client.ctx.Done():
 					return
 
 				// When an error is sent through client.errChan, send an
@@ -140,7 +140,7 @@ func PubSub(ctx context.Context, upgrader *websocket.Upgrader, eventChan chan *E
 				// the message with the WebSocket connection.
 				case msg := <-mappedTopic.msgChan:
 
-					// Write the message to the client.
+					// Write the WebSocket message to the client.
 					if err := conn.WritePreparedMessage(msg); err != nil {
 
 						// If it's a close sent error, return.

@@ -4,7 +4,7 @@ import (
 	"time"
 )
 
-type Option func(*publisher)
+type Option func(*Publisher)
 
 const (
 	defaultPongTimeout  = time.Second
@@ -12,13 +12,13 @@ const (
 )
 
 func WithPongTimeout(timeout time.Duration) Option {
-	return func(p *publisher) {
+	return func(p *Publisher) {
 		p.pongTimeout = timeout
 	}
 }
 
 func WithCloseTimeout(timeout time.Duration) Option {
-	return func(p *publisher) {
+	return func(p *Publisher) {
 		p.closeTimeout = timeout
 	}
 }

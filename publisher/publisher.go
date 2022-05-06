@@ -10,8 +10,8 @@ import (
 	"github.com/pkg/errors"
 )
 
-// publisher handles publishing to and reading from a WebSocket based Pub/Sub server.
-type publisher struct {
+// Publisher handles publishing to and reading from a WebSocket based Pub/Sub server.
+type Publisher struct {
 	conn         *websocket.Conn
 	errChan      chan error
 	ctx          context.Context
@@ -22,20 +22,21 @@ type publisher struct {
 }
 
 // NewPublisher return a pointer to a publisher.
-func NewPublisher(dialer *websocket.Dialer, addr, topic string, headers http.Header, options ...Option) (*publisher, *http.Response, error) {
+func NewPublisher(dialer *websocket.Dialer, addr, topic string, headers http.Header, options ...Option) (*Publisher, *http.Response, error) {
 
 	// Set the client_type header to publisher.
 	headers.Set("client_type", "publisher")
+	headers.Set("topic", topic)
 
 	// Dial the Pub/Sub server with the given address and topic and headers.
-	conn, httpRes, err := dialer.Dial(addr+"/"+topic, headers)
+	conn, httpRes, err := dialer.Dial(addr, headers)
 	if err != nil {
 		return nil, httpRes, errors.Wrap(err, "cannot dial Pub/Sub server")
 	}
 
 	// Create a publisher, and a cancel context to go with it.
 	ctx, cancel := context.WithCancel(context.Background())
-	p := &publisher{
+	p := &Publisher{
 		conn:         conn,
 		errChan:      make(chan error),
 		ctx:          ctx,
@@ -61,14 +62,15 @@ func NewPublisher(dialer *websocket.Dialer, addr, topic string, headers http.Hea
 
 // Close stops all of the publisher's long running goroutines, then closes the
 // publisher's WebSocket connection.
-func (p *publisher) Close() (err error) {
+func (p *Publisher) Close() (err error) {
 
 	// Cancel the publisher's context.
 	p.cancel()
 
 	// Write a WebSocket close message to the Pub/Sub server.
 	d := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "")
-	if writeErr := p.conn.WriteControl(websocket.CloseMessage, d, time.Now().Add(p.pongTimeout)); writeErr != nil {
+	writeErr := p.conn.WriteControl(websocket.CloseMessage, d, time.Now().Add(p.pongTimeout))
+	if writeErr != nil && writeErr != websocket.ErrCloseSent {
 		err = errors.Wrap(writeErr, "cannot write WebSocket close message")
 	}
 
@@ -96,20 +98,23 @@ func (p *publisher) Close() (err error) {
 }
 
 // Error returns the publisher's error channel.
-func (p *publisher) Error() chan error {
+func (p *Publisher) Error() chan error {
 	return p.errChan
 }
 
 // Publish publishes the given message to the Pub/Sub server.
-func (p *publisher) Publish(msg []byte) error {
+func (p *Publisher) Publish(msg []byte) error {
 	return errors.Wrap(p.conn.WriteMessage(websocket.BinaryMessage, msg), "cannot write WebSocket message")
 }
 
 // read forever listens for WebSocket messages from the Pub/Sub server.
-func (p *publisher) read() {
+func (p *Publisher) read() {
 
 	// Before returning, tell the publisher's wait group that this goroutine is finished.
-	defer p.wg.Done()
+	defer func() {
+		p.cancel()
+		p.wg.Done()
+	}()
 
 	for {
 		select {
@@ -125,11 +130,6 @@ func (p *publisher) read() {
 				// Listen for WebSocket messages from the client.
 				_, _, err := p.conn.ReadMessage()
 				if err != nil {
-
-					// If it's a close error, return.
-					if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
-						return
-					}
 
 					// Send the error through the publisher's error channel.
 					p.errChan <- errors.Wrap(err, "cannot listen for WebSocket messages")

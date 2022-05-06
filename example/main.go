@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
@@ -13,6 +14,10 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/Sidney-Bernardin/pubsub"
+)
+
+const (
+	pongTimeout = time.Second
 )
 
 func main() {
@@ -25,9 +30,9 @@ func main() {
 	r := mux.NewRouter()
 
 	// Create a Pub/Sub handler.
+	ctx, cancel := context.WithCancel(context.Background())
 	events := make(chan *pubsub.Event)
-	ctx := context.Background()
-	r.Handle("/{topic_name}", pubsub.PubSub(ctx, &websocket.Upgrader{}, events))
+	r.Handle("/", pubsub.PubSub(ctx, &websocket.Upgrader{}, events, pongTimeout))
 
 	// Get the optional port from an environment variable.
 	port, ok := os.LookupEnv("PORT")
@@ -55,6 +60,7 @@ func main() {
 
 		// When an OS signal is sent through the signals channel, return.
 		case s := <-signals:
+			cancel()
 			logger.Info().Str("signal", s.String()).Msgf("Smooth shutdown")
 			return
 
