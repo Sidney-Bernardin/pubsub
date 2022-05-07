@@ -69,5 +69,7 @@ func main() {
 
 	signals := make(chan os.Signal, 10)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
-	<-signals
+	s := <-signals
+
+	log.Printf("Smooth shutdown: %s", s.String())
 }
