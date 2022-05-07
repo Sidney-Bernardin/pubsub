@@ -1,4 +1,4 @@
-package publisher
+package subscriber
 
 import (
 	"context"
@@ -10,8 +10,13 @@ import (
 	"github.com/pkg/errors"
 )
 
-type Publisher struct {
+var (
+	ErrNotBinaryMessage = errors.New("message type is not binary")
+)
+
+type Subscriber struct {
 	conn         *websocket.Conn
+	msgChan      chan []byte
 	errChan      chan error
 	ctx          context.Context
 	cancel       context.CancelFunc
@@ -20,9 +25,9 @@ type Publisher struct {
 	closeTimeout time.Duration
 }
 
-func NewPublisher(dialer *websocket.Dialer, addr, topic string, headers http.Header, options ...Option) (*Publisher, *http.Response, error) {
+func NewSubscriber(dialer *websocket.Dialer, addr, topic string, headers http.Header, options ...Option) (*Subscriber, *http.Response, error) {
 
-	headers.Set("client_type", "publisher")
+	headers.Set("client_type", "subscriber")
 	headers.Set("topic", topic)
 
 	conn, httpRes, err := dialer.Dial(addr, headers)
@@ -31,8 +36,9 @@ func NewPublisher(dialer *websocket.Dialer, addr, topic string, headers http.Hea
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	p := &Publisher{
+	p := &Subscriber{
 		conn:         conn,
+		msgChan:      make(chan []byte),
 		errChan:      make(chan error),
 		ctx:          ctx,
 		cancel:       cancel,
@@ -52,7 +58,7 @@ func NewPublisher(dialer *websocket.Dialer, addr, topic string, headers http.Hea
 	return p, httpRes, nil
 }
 
-func (p *Publisher) Close() (err error) {
+func (p *Subscriber) Close() (err error) {
 
 	p.cancel()
 
@@ -78,15 +84,11 @@ func (p *Publisher) Close() (err error) {
 	return
 }
 
-func (p *Publisher) Error() chan error {
+func (p *Subscriber) Error() chan error {
 	return p.errChan
 }
 
-func (p *Publisher) Publish(msg []byte) error {
-	return errors.Wrap(p.conn.WriteMessage(websocket.BinaryMessage, msg), "cannot write WebSocket message")
-}
-
-func (p *Publisher) read() {
+func (p *Subscriber) read() {
 
 	defer func() {
 		p.cancel()
@@ -101,11 +103,17 @@ func (p *Publisher) read() {
 
 		default:
 
-			_, _, err := p.conn.ReadMessage()
+			msgType, payload, err := p.conn.ReadMessage()
 			if err != nil {
-
 				p.errChan <- errors.Wrap(err, "cannot listen for WebSocket messages")
 			}
+
+			if msgType != websocket.BinaryMessage {
+				p.errChan <- errors.Wrapf(ErrNotBinaryMessage, "got WebSocket message of type %v", msgType)
+				continue
+			}
+
+			p.msgChan <- payload
 		}
 	}
 }

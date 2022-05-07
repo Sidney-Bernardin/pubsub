@@ -22,9 +22,7 @@ func publish(pub *publisher.Publisher, msg []byte) {
 		}
 	}()
 
-	if err := pub.Publish([]byte("Hello, World!")); err != nil {
-		log.Fatalf("Cannot publish: %v", err)
-	}
+	ticker := time.NewTicker(2 * time.Second)
 
 	for {
 		select {
@@ -37,19 +35,22 @@ func publish(pub *publisher.Publisher, msg []byte) {
 			}
 
 			log.Fatalf("Unexpected error from the publisher: %v", err)
+		case <-ticker.C:
+			if err := pub.Publish([]byte("Hello, World!")); err != nil {
+				log.Fatalf("Cannot publish: %v", err)
+				return
+			}
 		}
 	}
 }
 
 func main() {
 
-	// Get the URL from an environment variable.
 	url, ok := os.LookupEnv("URL")
 	if !ok {
 		log.Fatalf("URL must be set as an environment variable")
 	}
 
-	// Create a publisher.
 	pub, _, err := publisher.NewPublisher(
 		websocket.DefaultDialer,
 		url,
@@ -59,15 +60,13 @@ func main() {
 		publisher.WithCloseTimeout(2*time.Second),
 	)
 
-	// Handle the error.
 	if err != nil {
-		log.Fatalf("Cannot create a publisher: %v", err) // With github.com/pkg/errors, you can use errors.Cause(err)
+		log.Fatalf("Cannot create a publisher: %v", err)
 		return
 	}
 
 	go publish(pub, []byte("Hello, World"))
 
-	// When an OS signal is sent through the signals channel, return.
 	signals := make(chan os.Signal, 10)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	<-signals
